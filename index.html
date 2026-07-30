@@ -1062,7 +1062,22 @@ async function attemptLogin(){
       // Students self-register on first login (matches the original "just log in
       // with your roll number" UX) — first attempt tries sign-in; if the account
       // doesn't exist yet, we create it on the spot.
-      let { data, error } = await supabase.auth.signInWithPassword({ email: rollToEmail(lower), password: pass });
+      const email = rollToEmail(lower);
+
+      console.log("===== LOGIN DEBUG =====");
+      console.log("Roll entered:", lower);
+      console.log("Email sent:", email);
+      console.log("Password entered:", pass);
+
+      let { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password: pass
+      });
+
+      console.log("Returned data:", data);
+      console.log("Returned error:", error);
+      console.log("Error message:", error?.message);
+      console.log("=======================");
       if (error && error.message.includes('Invalid login credentials')) {
         const signUp = await supabase.auth.signUp({ email: rollToEmail(lower), password: pass });
         if (signUp.error) throw signUp.error;
