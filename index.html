@@ -593,7 +593,7 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
         <div class="logo-wrapper">
 
             <img
-                src="\assets\logo.jpeg"
+                src="C:\Users\sandy\Downloads\image.jpg.jpeg"
                 alt="SSM BITES Logo"
                 class="logo-img"
             >
@@ -623,7 +623,7 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
     <div class="scroll-area">
       <div class="login-logo">
     <img
-        src="\assets\logo.jpeg"
+        src="C:\Users\sandy\Downloads\image.jpg.jpeg""
         alt="SSM BITES Logo"
         class="login-logo-img">
 </div>
@@ -1059,68 +1059,10 @@ async function attemptLogin(){
     }
 
     if (isNumericRoll) {
-
-    const email = rollToEmail(lower);
-
-    // Try login first
-    let { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password: pass
-    });
-
-    // If account doesn't exist, create it
-    if (error && error.message.includes("Invalid login credentials")) {
-
-        const signUp = await supabase.auth.signUp({
-            email,
-            password: pass
-        });
-
-        if (signUp.error) throw signUp.error;
-
-        const { data: studentRow, error: studentError } = await supabase
-            .from("students")
-            .insert({
-                auth_id: signUp.data.user.id,
-                roll_number: lower
-            })
-            .select()
-            .single();
-
-        if (studentError) throw studentError;
-
-        const { error: roleError } = await supabase
-            .from("user_roles")
-            .insert({
-                auth_id: signUp.data.user.id,
-                role: "student",
-                ref_id: studentRow.id
-            });
-
-        if (roleError) throw roleError;
-
-        data = signUp.data;
-    }
-
-    else if (error) {
-        throw error;
-    }
-
-    const roleRow = await requireRole(data.user.id, ['student']);
-
-    await hydrateAndEnter(
-        'student',
-        roleRow.ref_id,
-        data.user.id
-    );
-
-    return;
-}
-
-      console.log("Returned data:", data);
-      console.log("Returned error:", error);
-      console.log("Error message:", error?.message);
-      console.log("=======================");
+      // Students self-register on first login (matches the original "just log in
+      // with your roll number" UX) — first attempt tries sign-in; if the account
+      // doesn't exist yet, we create it on the spot.
+      let { data, error } = await supabase.auth.signInWithPassword({ email: rollToEmail(lower), password: pass });
       if (error && error.message.includes('Invalid login credentials')) {
         const signUp = await supabase.auth.signUp({ email: rollToEmail(lower), password: pass });
         if (signUp.error) throw signUp.error;
@@ -1144,14 +1086,11 @@ async function attemptLogin(){
     await hydrateAndEnter(roleRow.role, roleRow.ref_id, data.user.id);
 
   } catch (e) {
-    console.error("LOGIN ERROR:", e);
-
     await supabase.auth.signOut();
-
     errMsg.textContent = humanizeAuthError(e);
     errEl.classList.add('show');
   }
-
+}
 
 async function requireRole(authId, allowed) {
   const { data: roleRow, error } = await supabase
@@ -1595,18 +1534,15 @@ function selectPayMethod(id){ state.selectedPayMethod=id; renderPayMethods(); }
 
 async function callEdgeFunction(name, body) {
   const { data: sessionData } = await supabase.auth.getSession();
-
   const resp = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
-      "apikey": SUPABASE_ANON_KEY,
-      "Authorization": `Bearer ${sessionData.session.access_token}`,
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${sessionData.session.access_token}`,
     },
     body: JSON.stringify(body),
   });
-
-  return await resp.json();
+  return resp.json();
 }
 
 async function syncCartToServer() {
