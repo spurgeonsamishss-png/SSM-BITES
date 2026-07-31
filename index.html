@@ -1151,7 +1151,7 @@ async function attemptLogin(){
     errMsg.textContent = humanizeAuthError(e);
     errEl.classList.add('show');
   }
-}
+
 
 async function requireRole(authId, allowed) {
   const { data: roleRow, error } = await supabase
