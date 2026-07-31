@@ -1059,20 +1059,63 @@ async function attemptLogin(){
     }
 
     if (isNumericRoll) {
-      // Students self-register on first login (matches the original "just log in
-      // with your roll number" UX) — first attempt tries sign-in; if the account
-      // doesn't exist yet, we create it on the spot.
-      const email = rollToEmail(lower);
 
-      console.log("===== LOGIN DEBUG =====");
-      console.log("Roll entered:", lower);
-      console.log("Email sent:", email);
-      console.log("Password entered:", pass);
+    const email = rollToEmail(lower);
 
-      let { data, error } = await supabase.auth.signInWithPassword({
+    // Try login first
+    let { data, error } = await supabase.auth.signInWithPassword({
         email,
         password: pass
-      });
+    });
+
+    // If account doesn't exist, create it
+    if (error && error.message.includes("Invalid login credentials")) {
+
+        const signUp = await supabase.auth.signUp({
+            email,
+            password: pass
+        });
+
+        if (signUp.error) throw signUp.error;
+
+        const { data: studentRow, error: studentError } = await supabase
+            .from("students")
+            .insert({
+                auth_id: signUp.data.user.id,
+                roll_number: lower
+            })
+            .select()
+            .single();
+
+        if (studentError) throw studentError;
+
+        const { error: roleError } = await supabase
+            .from("user_roles")
+            .insert({
+                auth_id: signUp.data.user.id,
+                role: "student",
+                ref_id: studentRow.id
+            });
+
+        if (roleError) throw roleError;
+
+        data = signUp.data;
+    }
+
+    else if (error) {
+        throw error;
+    }
+
+    const roleRow = await requireRole(data.user.id, ['student']);
+
+    await hydrateAndEnter(
+        'student',
+        roleRow.ref_id,
+        data.user.id
+    );
+
+    return;
+}
 
       console.log("Returned data:", data);
       console.log("Returned error:", error);
