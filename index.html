@@ -585,6 +585,22 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
 /* small helper */
 .hidden{display:none !important;}
 .flex-between{display:flex; align-items:center; justify-content:space-between;}
+
+.login-cta-btn{
+    background:#ffffff !important;
+    border:none;
+    box-shadow:0 10px 30px rgba(0,0,0,0.25);
+    color:#D9480F;
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    font-weight:800;
+}
+.login-cta-arrow{
+    width:34px; height:34px; border-radius:50%;
+    background:#D9480F;
+    display:flex; align-items:center; justify-content:center;
+    font-weight:800; flex-shrink:0;
+    color:#ffffff;
+}
 </style>
 </head>
 <body>
@@ -658,7 +674,9 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
             <span class="eye-btn" onclick="togglePassVisibility()" id="eyeIcon">👁️</span>
           </div>
         </div>
-        <button class="primary-btn" style="margin-top:8px;" onclick="attemptLogin()">Log In</button>
+        <button class="primary-btn login-cta-btn" style="margin-top:8px;" onclick="attemptLogin()">
+          <span class="login-cta-arrow">→</span><span>Log In</span>
+        </button>
       </div>
 
       <div class="login-hint glass-tight glass">🔐 Students can log in with their college roll number.</div>
