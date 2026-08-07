@@ -1299,6 +1299,7 @@ async function loadFoods(){
       images:menu_images(storage_path, is_primary),
       daily_stock(remaining_qty, stock_date)
     `)
+    .neq('status', 'archived')
     .order('created_at', { ascending:false });
   if (error) { showToast('Could not load menu'); state.foods = []; return; }
 
@@ -1632,7 +1633,8 @@ async function processPayment(){
         }
       },
       modal: {
-        ondismiss: function () {
+        ondismiss: async function () {
+          await supabase.rpc('mark_payment_failed', { p_order_id: order.order_id, p_reason: 'cancelled_by_user' });
           showToast('Payment cancelled');
         },
       },
@@ -1858,7 +1860,7 @@ async function renderAdminDashboard(){
   }
 
   const today = new Date().toISOString().slice(0,10);
-  const { data: todaysOrders } = await supabase.from('orders').select('status,total_amount').eq('order_date', today);
+  const { data: todaysOrders } = await supabase.from('orders').select('status,total_amount').eq('order_date', today).neq('status', 'pending_payment');
   const orders = todaysOrders || [];
   const revenue = orders.filter(o=>o.status!=='cancelled').reduce((s,o)=>s+Number(o.total_amount),0);
   document.getElementById('statRevenue').textContent = '₹'+revenue;
@@ -1918,10 +1920,17 @@ async function renderAdminMenu(){
   }).join('');
 }
 async function deleteFood(id){
-  const { error } = await supabase.from('menu_items').delete().eq('id', id);
-  if (error) { showToast('Could not delete item'); return; }
+  const { count } = await supabase.from('order_items').select('*', { count: 'exact', head: true }).eq('menu_item_id', id);
+  if (count && count > 0) {
+    const { error } = await supabase.from('menu_items').update({ status: 'archived' }).eq('id', id);
+    if (error) { console.error(error); showToast('Could not archive item'); return; }
+    showToast('Item has order history — archived instead of deleted');
+  } else {
+    const { error } = await supabase.from('menu_items').delete().eq('id', id);
+    if (error) { console.error(error); showToast('Could not delete item: ' + error.message); return; }
+    showToast('Item removed from menu');
+  }
   await renderAdminMenu();
-  showToast('Item removed from menu');
 }
 let tempFood = null;
 let tempFoodImageFile = null;
@@ -2066,7 +2075,7 @@ async function renderAdminOrders(){
     .from('orders')
     .select('id, token_number, status, total_amount, placed_at, order_items(item_name,quantity), student:students(roll_number)')
     .order('placed_at', { ascending:false });
-  if (state.adminOrderTab!=='all') query = query.eq('status', state.adminOrderTab);
+  query = state.adminOrderTab!=='all' ? query.eq('status', state.adminOrderTab) : query.neq('status', 'pending_payment');
   const { data: list } = await query;
 
   const { count: activeCount } = await supabase
@@ -2106,7 +2115,7 @@ async function updateOrderStatus(orderId, status){
 ========================================================= */
 async function renderAdminReports(){
   const { data: allOrders } = await supabase.from('orders').select('total_amount,status');
-  const valid = (allOrders||[]).filter(o=>o.status!=='cancelled');
+  const valid = (allOrders||[]).filter(o=>o.status!=='cancelled' && o.status!=='pending_payment');
   const total = valid.reduce((s,o)=>s+Number(o.total_amount),0);
   document.getElementById('repWeekly').textContent = '₹'+(total*4);
   document.getElementById('repMonthly').textContent = '₹'+(total*16);
@@ -2136,9 +2145,9 @@ async function renderAdminReports(){
    SUPER ADMIN: DASHBOARD
 ========================================================= */
 async function renderSuperDashboard(){
-  const { data: allOrders } = await supabase.from('orders').select('status,total_amount,order_items(quantity)');
+  const { data: allOrders } = await supabase.from('orders').select('status,total_amount,order_items(quantity)').neq('status', 'pending_payment');
   const orders = allOrders || [];
-  const valid = orders.filter(o=>o.status!=='cancelled');
+  const valid = orders.filter(o=>o.status!=='cancelled' && o.status!=='pending_payment');
   const totalRevenue = valid.reduce((s,o)=>s+Number(o.total_amount),0);
   const totalItemsSold = valid.reduce((s,o)=>s+o.order_items.reduce((si,i)=>si+i.quantity,0),0);
 
