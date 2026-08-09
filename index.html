@@ -695,6 +695,7 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
       </div>
     </div>
     <div class="scroll-area" id="homeScroll">
+      <div class="chip-row" id="menuModeTabs" style="padding-top:14px;"></div>
       <div class="window-banner" id="windowBanner"></div>
       <div class="search-bar glass-tight glass"><span>🔍</span><input id="searchInput" placeholder="Search for food, e.g. Idli, Coffee..." oninput="renderMenu()"></div>
       <div class="chip-row" id="chipRow"></div>
@@ -800,11 +801,15 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
 
   <!-- ================= ADMIN: MENU MGMT ================= -->
   <section class="screen" id="screen-admin-menu">
-    <div class="topbar">
-      <div class="topbar-name">Manage Menu</div>
-      <button class="icon-btn" onclick="openAddFood()">➕</button>
-    </div>
-    <div class="scroll-area" id="adminMenuScroll"></div>
+  <div class="topbar">
+    <div class="topbar-name">Manage Menu</div>
+    <button class="icon-btn" onclick="openAddFood()">➕</button>
+  </div>
+  <div class="chip-row" style="padding-top:0;">
+    <button class="chip active" data-adminmenumode="snacks" onclick="setAdminMenuMode('snacks')">🍟 Snacks Menu</button>
+    <button class="chip" data-adminmenumode="lunch" onclick="setAdminMenuMode('lunch')">🍱 Lunch Menu</button>
+  </div>
+  <div class="scroll-area" id="adminMenuScroll"></div>
   </section>
 
   <!-- ================= ADMIN: ORDERS MGMT ================= -->
@@ -1006,6 +1011,8 @@ let state = {
   currentAdminScreen: 'admin',
   currentSuperScreen: 'superadmin',
   activeCategory: 'All',
+  menuMode: 'snacks',       // 'snacks' | 'lunch' — which tab is active
+  adminMenuMode: 'snacks',  // separate tab state for the admin screen
   orderTab: 'active',
   adminOrderTab: 'all',
   cart: {},               // client-side only until checkout: {menu_item_id: qty}
@@ -1199,27 +1206,21 @@ function applyTheme(){
 /* =========================================================
    ORDERING WINDOW — read from canteen_settings + order_window
 ========================================================= */
-async function getOrderingWindow(){
+async function getOrderingWindow(category){
   const { data: settings } = await supabase.from('canteen_settings').select('*').single();
   if (settings?.admin_window_override) return { open:true, label:'Admin Override', closesAt:'—' };
 
-  const { data: windows } = await supabase.from('order_window').select('*').eq('is_active', true);
+  const { data: windows } = await supabase.from('order_window').select('*').eq('category', category).eq('is_active', true);
   if (!windows || windows.length === 0) return { open:false, label:'No sessions configured', opensAt:'—' };
+  const w = windows[0];
 
   const now = new Date();
   const mins = now.getHours()*60 + now.getMinutes();
-  for (const w of windows) {
-    const [sh,sm] = w.start_time.split(':').map(Number);
-    const [eh,em] = w.end_time.split(':').map(Number);
-    const start = sh*60+sm, end = eh*60+em;
-    if (mins>=start && mins<=end) return { open:true, label:w.label, closesAt: minsToStr(end) };
-  }
-  let next = windows.find(w=>{
-    const [sh,sm] = w.start_time.split(':').map(Number);
-    return mins < sh*60+sm;
-  }) || windows[0];
-  const [nsh,nsm] = next.start_time.split(':').map(Number);
-  return { open:false, label: next.label, opensAt: minsToStr(nsh*60+nsm) };
+  const [sh,sm] = w.start_time.split(':').map(Number);
+  const [eh,em] = w.end_time.split(':').map(Number);
+  const start = sh*60+sm, end = eh*60+em;
+  if (mins>=start && mins<=end) return { open:true, label:w.label, closesAt: minsToStr(end) };
+  return { open:false, label:w.label, opensAt: minsToStr(start), closesAt: minsToStr(end) };
 }
 function minsToStr(mins){
   let h = Math.floor(mins/60), m = mins%60;
@@ -1281,12 +1282,21 @@ async function renderHome(){
   const hr = new Date().getHours();
   document.getElementById('homeGreet').textContent = (hr<12?'Good morning 👋': hr<17?'Good afternoon 👋':'Good evening 👋');
   await loadFoods();
+  const w = await getOrderingWindow(state.menuMode);
+  state.currentMenuWindowOpen = w.open;
   await renderWindowBanner();
+  renderMenuModeTabs();
   renderChips();
   renderPopular();
   renderMenu();
   updateCartFab();
   await updateNotifDot();
+}
+function renderMenuModeTabs(){
+  document.getElementById('menuModeTabs').innerHTML = `
+    <button class="chip ${state.menuMode==='snacks'?'active':''}" data-menumode="snacks" onclick="setMenuMode('snacks')">🍟 Snacks</button>
+    <button class="chip ${state.menuMode==='lunch'?'active':''}" data-menumode="lunch" onclick="setMenuMode('lunch')">🍱 Lunch</button>
+  `;
 }
 
 async function loadFoods(){
@@ -1294,12 +1304,11 @@ async function loadFoods(){
   const { data, error } = await supabase
     .from('menu_items')
     .select(`
-      id, name, description, price, is_veg, emoji_icon, qty_enabled, status, rating, rating_count,
+      id, name, description, price, is_veg, emoji_icon, qty_enabled, status, rating, rating_count, order_type,
       category:food_categories(name),
       images:menu_images(storage_path, is_primary),
       daily_stock(remaining_qty, stock_date)
     `)
-    .neq('status', 'archived')
     .order('created_at', { ascending:false });
   if (error) { showToast('Could not load menu'); state.foods = []; return; }
 
@@ -1312,32 +1321,29 @@ async function loadFoods(){
     }
     const todayStock = (f.daily_stock||[]).find(s=>s.stock_date===today);
     return {
-      id: f.id,
-      name: f.name,
-      desc: f.description,
-      price: Number(f.price),
-      veg: f.is_veg,
-      emoji: f.emoji_icon || '🍽️',
-      image: imageUrl,
-      qtyEnabled: f.qty_enabled,
-      qty: todayStock ? todayStock.remaining_qty : 0,
-      status: f.status,
-      rating: Number(f.rating) || 0,
-      ratingCount: f.rating_count || 0,
+      id: f.id, name: f.name, desc: f.description, price: Number(f.price), veg: f.is_veg,
+      emoji: f.emoji_icon || '🍽️', image: imageUrl, qtyEnabled: f.qty_enabled,
+      qty: todayStock ? todayStock.remaining_qty : 0, status: f.status,
+      rating: Number(f.rating) || 0, ratingCount: f.rating_count || 0,
       category: f.category?.name || 'Veg',
+      orderType: f.order_type || null,   // 'snacks' | 'lunch' | null (untagged legacy item)
     };
   });
 }
 
 async function renderWindowBanner(){
-  const w = await getOrderingWindow();
+  const w = await getOrderingWindow(state.menuMode);
   const el = document.getElementById('windowBanner');
+  const label = state.menuMode === 'snacks' ? 'Snacks' : 'Lunch';
   if(w.open){
     el.className = 'window-banner open glass';
-    el.innerHTML = `<span class="window-dot"></span><div><div class="window-text-title">Ordering is open · ${w.label}</div><div class="window-text-sub">${w.closesAt==='—'?'Enabled by canteen staff':'Closes at '+w.closesAt+' — place your order now'}</div></div>`;
+    el.innerHTML = `<span class="window-dot"></span><div><div class="window-text-title">${label} ordering is open · ${w.label}</div><div class="window-text-sub">${w.closesAt==='—'?'Enabled by canteen staff':'Closes at '+w.closesAt+' — place your order now'}</div></div>`;
   } else {
     el.className = 'window-banner closed glass';
-    el.innerHTML = `<span class="window-dot"></span><div><div class="window-text-title">Orders are currently closed</div><div class="window-text-sub">The next ordering window opens at ${w.opensAt} (${w.label})</div></div>`;
+    const msg = state.menuMode === 'lunch'
+      ? `Lunch ordering is currently closed. Lunch orders are accepted only between 11:00 AM and 1:45 PM.`
+      : `Snacks ordering is currently closed. Snacks orders are accepted only between 8:20 AM and 4:30 PM.`;
+    el.innerHTML = `<span class="window-dot"></span><div><div class="window-text-title">${label} ordering closed</div><div class="window-text-sub">${msg}</div></div>`;
   }
 }
 function renderChips(){
@@ -1355,7 +1361,7 @@ function escapeHtml(s){
 }
 
 function renderPopular(){
-  const active = state.foods.filter(f=>f.status==='active');
+  const active = state.foods.filter(f=>f.status==='active' && f.orderType===state.menuMode);
   document.getElementById('popularSection').style.display = active.length ? 'block' : 'none';
   const top = [...active].sort((a,b)=>b.ratingCount-a.ratingCount).slice(0,6);
   document.getElementById('popularRow').innerHTML = top.map(f=>`
@@ -1370,14 +1376,15 @@ function renderPopular(){
 }
 function renderMenu(){
   const q = (document.getElementById('searchInput').value||'').toLowerCase();
+  const modeFiltered = state.foods.filter(f => f.orderType === state.menuMode);
 
-  if(state.foods.length===0){
+  if(modeFiltered.length===0){
     document.getElementById('menuHeading').textContent = "Today's Menu";
     document.getElementById('menuCount').textContent = '';
-    document.getElementById('menuList').innerHTML = `<div class="empty-state"><div class="empty-icon">🍽️</div><div class="empty-title">Menu not published yet</div><div class="empty-sub">The canteen hasn't added today's items. Check back soon!</div></div>`;
+    document.getElementById('menuList').innerHTML = `<div class="empty-state"><div class="empty-icon">🍽️</div><div class="empty-title">No ${state.menuMode} items yet</div><div class="empty-sub">The canteen hasn't added any ${state.menuMode} items. Check back soon!</div></div>`;
     return;
   }
-  let list = state.foods.filter(f=>{
+  let list = modeFiltered.filter(f=>{
     const catMatch = state.activeCategory==='All' || f.category===state.activeCategory;
     const qMatch = f.name.toLowerCase().includes(q);
     return catMatch && qMatch;
@@ -1390,8 +1397,10 @@ function renderMenu(){
   }
   document.getElementById('menuList').innerHTML = list.map(f=>foodCardHTML(f)).join('');
 }
+
 function foodCardHTML(f){
   const soldOut = f.status!=='active' || (f.qtyEnabled && f.qty<=0);
+  const canOrder = state.currentMenuWindowOpen && !soldOut;
   const inCartQty = state.cart[f.id]||0;
   let metaTag = '';
   if(soldOut) metaTag = `<span class="sold-out-tag">SOLD OUT</span>`;
@@ -1400,6 +1409,8 @@ function foodCardHTML(f){
   let control;
   if(soldOut){
     control = `<button class="step-btn add-btn" style="opacity:0.35; background:var(--surface-3); color:var(--text-low); box-shadow:none;" disabled>Sold Out</button>`;
+  } else if(!canOrder){
+    control = `<button class="step-btn add-btn" style="opacity:0.35;box-shadow:none;background:var(--surface-3);color:var(--text-low);" disabled>Closed</button>`;
   } else if(inCartQty===0){
     control = `<button class="step-btn add-btn" onclick="addToCart('${f.id}')">Add</button>`;
   } else {
@@ -1425,7 +1436,7 @@ function foodCardHTML(f){
 ========================================================= */
 async function openFoodDetail(id){
   const f = state.foods.find(x=>x.id===id);
-  const win = await getOrderingWindow();
+  const win = await getOrderingWindow(f.orderType);
   const soldOut = f.status!=='active' || (f.qtyEnabled && f.qty<=0);
   const canOrder = win.open && !soldOut;
 
@@ -1464,8 +1475,7 @@ async function openFoodDetail(id){
 ========================================================= */
 async function addToCart(id){
   const f = state.foods.find(x=>x.id===id);
-  const win = await getOrderingWindow();
-  if(!win.open){ showToast('Orders are currently closed'); return; }
+  if(!state.currentMenuWindowOpen){ showToast('Ordering is currently closed for this menu'); return; }
   const current = state.cart[id]||0;
   if(f.qtyEnabled && current+1 > f.qty){ showToast('Not enough stock available'); return; }
   state.cart[id] = current+1;
@@ -1500,37 +1510,33 @@ function openCart(){
   openSheet('cartSheet');
 }
 async function renderCartSheet(){
-  const win = await getOrderingWindow();
   const entries = Object.entries(state.cart);
   const linesEl = document.getElementById('cartLines');
   const sumEl = document.getElementById('cartSummary');
   const btn = document.getElementById('cartCheckoutBtn');
   if(entries.length===0){
     linesEl.innerHTML = `<div class="empty-state"><div class="empty-icon">🛒</div><div class="empty-title">Your cart is empty</div><div class="empty-sub">Add some delicious food to get started</div></div>`;
-    sumEl.innerHTML='';
-    btn.classList.add('disabled');
-    return;
+    sumEl.innerHTML=''; btn.classList.add('disabled'); return;
   }
+  const hasSnacks = entries.some(([id]) => state.foods.find(f=>f.id===id)?.orderType==='snacks');
+  const hasLunch = entries.some(([id]) => state.foods.find(f=>f.id===id)?.orderType==='lunch');
   linesEl.innerHTML = entries.map(([id,qty])=>{
     const f = state.foods.find(x=>x.id===id);
+    const tag = f.orderType === 'snacks' ? '🍟' : '🍱';
     return `<div class="cart-line">
       <div class="cart-line-thumb">${thumbInner(f)}</div>
-      <div class="cart-line-info"><div class="cart-line-name">${escapeHtml(f.name)}</div><div class="cart-line-price">₹${f.price} × ${qty}</div></div>
+      <div class="cart-line-info"><div class="cart-line-name">${tag} ${escapeHtml(f.name)}</div><div class="cart-line-price">₹${f.price} × ${qty}</div></div>
       <div class="qty-stepper"><button class="step-btn" onclick="decCart('${id}'); renderCartSheet(); updateCartFab();">−</button><span class="qty-val">${qty}</span><button class="step-btn" onclick="addToCart('${id}').then(()=>{renderCartSheet(); updateCartFab();})">+</button></div>
     </div>`;
   }).join('');
   const subtotal = cartTotal();
   sumEl.innerHTML = `
+    ${hasSnacks && hasLunch ? `<div class="summary-row" style="color:var(--accent2);"><span>🔀 Mixed order</span><span>Token: SL0xx</span></div>` : ''}
     <div class="summary-row"><span>Subtotal</span><span>₹${subtotal}</span></div>
     <div class="summary-row total"><span>Total</span><span>₹${subtotal}</span></div>
   `;
-  if(!win.open){
-    btn.classList.add('disabled');
-    btn.textContent = 'Orders are currently closed';
-  } else {
-    btn.classList.remove('disabled');
-    btn.textContent = 'Proceed to Pay';
-  }
+  btn.classList.remove('disabled');
+  btn.textContent = 'Proceed to Pay';
 }
 
 /* =========================================================
@@ -1545,8 +1551,21 @@ const PAY_METHODS = [
   {id:'credit_card', icon:'💳', label:'Credit Card'},
 ];
 async function openPayment(){
-  const win = await getOrderingWindow();
-  if(!win.open || cartCount()===0) return;
+  if(cartCount()===0) return;
+// Per-category window check happens server-side in place_order — this is
+// just a fast client-side pre-check so students see the popup instead of
+// a payment error if a window is closed.
+const cartIds = Object.keys(state.cart);
+const hasSnacks = cartIds.some(id => state.foods.find(f=>f.id===id)?.orderType==='snacks');
+const hasLunch = cartIds.some(id => state.foods.find(f=>f.id===id)?.orderType==='lunch');
+if (hasSnacks) {
+  const w = await getOrderingWindow('snacks');
+  if (!w.open) { showToast('Snacks ordering is currently closed (8:20 AM – 4:30 PM).'); return; }
+}
+if (hasLunch) {
+  const w = await getOrderingWindow('lunch');
+  if (!w.open) { showToast('Lunch ordering is currently closed (11:00 AM – 1:45 PM).'); return; }
+}
   closeSheet('cartSheet');
   renderPayMethods();
   document.getElementById('payTotal').textContent = '₹'+cartTotal();
@@ -1594,30 +1613,26 @@ async function processPayment(){
   btn.classList.add('disabled');
 
   try {
-    // 1. Push the local cart into the DB, then place the order atomically.
     await syncCartToServer();
     const { data: orderResult, error: orderErr } = await supabase.rpc('place_order', {
       p_student_id: state.studentId,
       p_pay_method: state.selectedPayMethod,
     });
-    if (orderErr) throw orderErr;
-    const order = orderResult[0]; // { order_id, token_number, total_amount }
+    if (orderErr) {
+      if (orderErr.message.includes('SNACKS_WINDOW_CLOSED')) throw new Error('Snacks ordering is currently closed (8:20 AM – 4:30 PM).');
+      if (orderErr.message.includes('LUNCH_WINDOW_CLOSED')) throw new Error('Lunch ordering is currently closed (11:00 AM – 1:45 PM).');
+      throw orderErr;
+    }
+    const order = orderResult[0]; // { order_id, total_amount } — no token yet
 
-    // 2. Ask the Edge Function to create a matching Razorpay order (keeps the secret key server-side).
     const rp = await callEdgeFunction('razorpay-create-order', {
-      orderId: order.order_id,
-      amount: Number(order.total_amount),
+      orderId: order.order_id, amount: Number(order.total_amount),
     });
     if (!rp.ok) throw new Error(rp.message || 'Could not start payment');
 
-    // 3. Open Razorpay's Checkout widget for the actual card/UPI entry.
     const options = {
-      key: rp.keyId,
-      amount: rp.amount,
-      currency: 'INR',
-      name: 'SSM Bites',
-      description: 'Canteen order ' + order.token_number,
-      order_id: rp.razorpayOrderId,
+      key: rp.keyId, amount: rp.amount, currency: 'INR', name: 'SSM Bites',
+      description: 'Canteen order', order_id: rp.razorpayOrderId,
       theme: { color: '#ff7a1a' },
       handler: async function (response) {
         const verify = await callEdgeFunction('razorpay-verify', {
@@ -1627,21 +1642,21 @@ async function processPayment(){
           razorpay_signature: response.razorpay_signature,
         });
         if (verify.ok) {
-          await finishSuccessfulOrder(order.token_number);
+          await finishSuccessfulOrder(verify.tokenNumber);
         } else {
-          showToast('Payment verification failed. Contact support with token ' + order.token_number);
+          showToast('Payment verification failed. Contact support.');
         }
       },
       modal: {
         ondismiss: async function () {
-          await supabase.rpc('mark_payment_failed', { p_order_id: order.order_id, p_reason: 'cancelled_by_user' });
           showToast('Payment cancelled');
+          await supabase.from('orders').update({ status:'cancelled', cancelled_at: new Date().toISOString() })
+            .eq('id', order.order_id).eq('status','pending_payment');
         },
       },
     };
     const rzp = new Razorpay(options);
     rzp.open();
-
   } catch (e) {
     showToast(e.message || 'Checkout failed — please try again');
   } finally {
@@ -1902,11 +1917,12 @@ async function openAdminWindowToggle(){
 async function renderAdminMenu(){
   await loadFoods();
   const el = document.getElementById('adminMenuScroll');
-  if(state.foods.length===0){
-    el.innerHTML = `<div class="empty-state"><div class="empty-icon">🍽️</div><div class="empty-title">No menu items yet</div><div class="empty-sub">Tap ➕ above to add today's first item. Students will see it instantly.</div></div>`;
+  const list = state.foods.filter(f => f.orderType === state.adminMenuMode);
+  if(list.length===0){
+    el.innerHTML = `<div class="empty-state"><div class="empty-icon">🍽️</div><div class="empty-title">No ${state.adminMenuMode} items yet</div><div class="empty-sub">Tap ➕ above to add the first ${state.adminMenuMode} item.</div></div>`;
     return;
   }
-  el.innerHTML = `<div style="height:6px;"></div>` + state.foods.map(f=>{
+  el.innerHTML = `<div style="height:6px;"></div>` + list.map(f=>{
     const soldOut = f.qtyEnabled && f.qty<=0;
     return `<div class="admin-menu-row glass">
       <div class="food-thumb">${thumbInner(f)}</div>
@@ -1918,6 +1934,12 @@ async function renderAdminMenu(){
       <button class="mini-icon-btn" onclick="deleteFood('${f.id}')">🗑️</button>
     </div>`;
   }).join('');
+
+  // Also flag any untagged legacy items so the admin knows to fix them
+  const untagged = state.foods.filter(f => !f.orderType);
+  if (untagged.length) {
+    el.innerHTML = `<div class="login-error show" style="margin:0 20px 12px 20px;"><span>⚠️</span><span>${untagged.length} item(s) have no Snacks/Lunch category set and are hidden from students. Edit them to fix.</span></div>` + el.innerHTML;
+  }
 }
 async function deleteFood(id){
   const { count } = await supabase.from('order_items').select('*', { count: 'exact', head: true }).eq('menu_item_id', id);
@@ -1940,7 +1962,7 @@ async function openAddFood(id){
   if(id){
     tempFood = {...state.foods.find(f=>f.id===id)};
   } else {
-    tempFood = {id:null, name:'', category:'Veg', veg:true, desc:'', price:'', emoji:'🍽️', image:null, qtyEnabled:false, qty:0};
+    tempFood = {id:null, name:'', category:'Veg', veg:true, desc:'', price:'', emoji:'🍽️', image:null, qtyEnabled:false, qty:0, orderType: state.adminMenuMode};
   }
   renderFoodForm();
   openSheet('foodFormSheet');
@@ -1949,6 +1971,15 @@ function renderFoodForm(){
   document.getElementById('foodFormContent').innerHTML = `
     <div class="sheet-handle"></div>
     <div class="sheet-title">${state.editingFoodId?'Edit Food Item':'Add New Food Item'}</div>
+
+    <div class="form-group" style="margin:0 0 14px 0;">
+      <label class="form-label">Menu Category (required)</label>
+      <select class="form-input glass-tight glass" id="ffOrderType">
+        <option value="snacks" ${tempFood.orderType==='snacks'?'selected':''}>🍟 Snacks</option>
+        <option value="lunch" ${tempFood.orderType==='lunch'?'selected':''}>🍱 Lunch</option>
+      </select>
+    </div>
+
     <div class="form-group" style="margin:0 0 14px 0;">
       <label class="form-label">Food Name</label>
       <input class="form-input glass-tight glass" id="ffName" value="${escapeHtml(tempFood.name)}" placeholder="e.g. Masala Dosa">
@@ -2018,13 +2049,14 @@ async function saveFood(){
   const price = parseFloat(document.getElementById('ffPrice').value)||0;
   const desc = document.getElementById('ffDesc').value.trim();
   const category = document.getElementById('ffCategory').value;
+  const orderType = document.getElementById('ffOrderType').value;
   if(!name || price<=0){ showToast('Please enter a valid name and price'); return; }
+  if(!['snacks','lunch'].includes(orderType)){ showToast('Please select a Menu Category'); return; }
   const qty = tempFood.qtyEnabled ? (parseInt(document.getElementById('ffQty').value)||0) : 0;
 
   const { data: catRow } = await supabase.from('food_categories').select('id').eq('name', category).single();
-
   const payload = {
-    name, price, description: desc, category_id: catRow.id,
+    name, price, description: desc, category_id: catRow.id, order_type: orderType,
     is_veg: category!=='Non-Veg', emoji_icon: tempFood.emoji,
     qty_enabled: tempFood.qtyEnabled, status: tempFood.status || 'active',
   };
@@ -2038,7 +2070,6 @@ async function saveFood(){
     if (error) { showToast('Could not add item'); return; }
     menuItemId = data.id;
   }
-
   if (tempFood.qtyEnabled) {
     const today = new Date().toISOString().slice(0,10);
     await supabase.from('daily_stock').upsert(
@@ -2046,16 +2077,12 @@ async function saveFood(){
       { onConflict: 'menu_item_id,stock_date' }
     );
   }
-
   if (tempFoodImageFile) {
     const path = `${menuItemId}/${Date.now()}_${tempFoodImageFile.name}`;
     const { error: upErr } = await supabase.storage.from('food-images').upload(path, tempFoodImageFile);
-    if (!upErr) {
-      await supabase.from('menu_images').insert({ menu_item_id: menuItemId, storage_path: path, is_primary: true });
-    }
+    if (!upErr) await supabase.from('menu_images').insert({ menu_item_id: menuItemId, storage_path: path, is_primary: true });
   }
-
-  showToast(state.editingFoodId ? 'Menu item updated ✓ — visible to students now' : 'Item added to menu ✓ — visible to students now');
+  showToast(state.editingFoodId ? 'Menu item updated ✓' : 'Item added ✓');
   closeSheet('foodFormSheet');
   await renderAdminMenu();
 }
@@ -2269,13 +2296,26 @@ async function deleteAdminAccount(id){
 ========================================================= */
 Object.assign(window, {
   togglePassVisibility, attemptLogin, toggleTheme, go, goAdmin, goSuper, doLogout, showToast,
-  setCategory, openFoodDetail, addToCart, decCart, openCart, openPayment, selectPayMethod,
+  setCategory, setMenuMode, setAdminMenuMode, openFoodDetail, addToCart, decCart, openCart, openPayment, selectPayMethod,
   processPayment, closeSheet, setOrderTab, openRateSheet, setStar, submitReview,
   openAdminWindowToggle, openAddFood, deleteFood, handleImageUpload, pickEmoji,
   toggleQtyTrack, toggleFoodActive, saveFood, setAdminOrderTab, updateOrderStatus,
   setSuperRevenuePeriod, openAddAdmin, createAdminAccount, openResetAdminPassword,
   confirmResetAdminPassword, deleteAdminAccount, renderCartSheet, updateCartFab,
 });
+function setMenuMode(mode){
+  state.menuMode = mode;
+  state.activeCategory = 'All';
+  document.querySelectorAll('[data-menumode]').forEach(c=>c.classList.toggle('active', c.dataset.menumode===mode));
+  renderChips();
+  renderWindowBanner();
+  renderMenu();
+}
+function setAdminMenuMode(mode){
+  state.adminMenuMode = mode;
+  document.querySelectorAll('[data-adminmenumode]').forEach(c=>c.classList.toggle('active', c.dataset.adminmenumode===mode));
+  renderAdminMenu();
+}
 
 </script>
 </body>

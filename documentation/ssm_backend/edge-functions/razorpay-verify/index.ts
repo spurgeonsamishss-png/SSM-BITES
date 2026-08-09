@@ -1,4 +1,4 @@
-// SSM BITES — Edge Function: razorpay-verify
+// SSM BITES — Edge Function: razorpay-verify (updated for Snacks/Lunch split)
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { crypto } from 'https://deno.land/std@0.224.0/crypto/mod.ts';
 
@@ -24,22 +24,28 @@ Deno.serve(async (req) => {
     const { orderId, razorpay_order_id, razorpay_payment_id, razorpay_signature } = await req.json();
 
     const expected = await hmacSha256Hex(RAZORPAY_KEY_SECRET, `${razorpay_order_id}|${razorpay_payment_id}`);
+    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
     if (expected !== razorpay_signature) {
-      const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+      // Signature failed — payment is not trustworthy. Mark it failed AND
+      // cancel the pending order immediately rather than leaving it to expire.
       await admin.from('payments').update({ status: 'failed' }).eq('order_id', orderId);
+      await admin.from('orders').update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+        .eq('id', orderId).eq('status', 'pending_payment');
       await admin.from('system_logs').insert({ severity: 'warning', source: 'payment', message: 'Signature mismatch', metadata: { orderId } });
       return json({ ok: false, message: 'Signature verification failed' }, 400);
     }
 
-    const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
-    await admin.rpc('mark_payment_success', {
+    const { data: confirmResult, error: confirmErr } = await admin.rpc('confirm_order_payment', {
       p_order_id: orderId,
       p_provider_order_id: razorpay_order_id,
       p_provider_payment_id: razorpay_payment_id,
       p_provider_signature: razorpay_signature,
     });
+    if (confirmErr) return json({ ok: false, message: confirmErr.message }, 500);
 
-    return json({ ok: true, status: 'success' });
+    const row = confirmResult?.[0];
+    return json({ ok: true, status: 'success', tokenNumber: row?.token_number, orderCategory: row?.order_category });
   } catch (e) {
     return json({ ok: false, message: String(e) }, 500);
   }
