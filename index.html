@@ -943,6 +943,10 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
   <div class="sheet-backdrop" id="adminFormSheet">
     <div class="sheet" id="adminFormContent"></div>
   </div>
+  <!-- ================= ORDER STATUS CONFIRMATION ================= -->
+  <div class="sheet-backdrop" id="confirmDialogSheet">
+    <div class="sheet" id="confirmDialogContent"></div>
+  </div>
 
   <!-- ================= TOKEN / CONFIRMATION SCREEN ================= -->
   <section class="screen" id="screen-token">
@@ -2123,15 +2127,57 @@ async function renderAdminOrders(){
         <div class="admin-order-student">Roll ${escapeHtml(o.student?.roll_number||'')} · ₹${o.total_amount} · ${timeAgo(o.placed_at)}</div>
         <div class="admin-order-items">${escapeHtml(itemsStr)}</div>
       </div>
-      <select class="status-select" onchange="updateOrderStatus('${o.id}', this.value)">
-        ${ADMIN_TABS.filter(s=>s!=='all').map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${ADMIN_TAB_LABELS[s]}</option>`).join('')}
-      </select>
+      ${o.status==='collected' || o.status==='cancelled'
+        ? `<div class="status-select status-locked">${ADMIN_TAB_LABELS[o.status]} 🔒</div>`
+        : `<select class="status-select" onchange="handleStatusSelect('${o.id}', this.value, '${o.status}', this)">
+             ${ADMIN_TABS.filter(s=>s!=='all').map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${ADMIN_TAB_LABELS[s]}</option>`).join('')}
+           </select>`}
     </div>`;
   }).join('');
 }
+function handleStatusSelect(orderId, newStatus, prevStatus, selectEl){
+  if (newStatus === prevStatus) return;
+  if (newStatus === 'collected' || newStatus === 'cancelled') {
+    openStatusConfirm(orderId, newStatus, prevStatus, selectEl);
+  } else {
+    updateOrderStatus(orderId, newStatus);
+  }
+}
+
+function openStatusConfirm(orderId, newStatus, prevStatus, selectEl){
+  const msg = newStatus === 'collected'
+    ? 'Are you sure you want to mark this order as Collected?'
+    : 'Are you sure you want to cancel this order?';
+  document.getElementById('confirmDialogContent').innerHTML = `
+    <h3 style="margin-bottom:10px;">${msg}</h3>
+    <p style="color:var(--text-mid); font-size:13px; margin-bottom:20px;">This cannot be undone once confirmed.</p>
+    <button class="primary-btn" onclick="applyStatusChange('${orderId}','${newStatus}')">${newStatus==='collected' ? 'Confirm' : 'Confirm Cancellation'}</button>
+    <button class="ghost-btn" style="margin-top:10px;" onclick="cancelStatusChange()">${newStatus==='collected' ? 'Cancel' : 'Keep Order'}</button>
+  `;
+  state.pendingStatusRevert = { selectEl, prevStatus };
+  openSheet('confirmDialogSheet');
+}
+
+function cancelStatusChange(){
+  const p = state.pendingStatusRevert;
+  if (p && p.selectEl) p.selectEl.value = p.prevStatus;
+  state.pendingStatusRevert = null;
+  closeSheet('confirmDialogSheet');
+}
+
+async function applyStatusChange(orderId, status){
+  closeSheet('confirmDialogSheet');
+  state.pendingStatusRevert = null;
+  await updateOrderStatus(orderId, status);
+}
+
 async function updateOrderStatus(orderId, status){
   const { error } = await supabase.from('orders').update({ status }).eq('id', orderId);
-  if (error) { showToast('Could not update status'); return; }
+  if (error) {
+    showToast(error.message.includes('already been') ? error.message : 'Could not update status');
+    await renderAdminOrders();
+    return;
+  }
   showToast(`Order status → ${ADMIN_TAB_LABELS[status]}`);
   await renderAdminOrders();
   await renderAdminDashboard();
@@ -2300,6 +2346,7 @@ Object.assign(window, {
   processPayment, closeSheet, setOrderTab, openRateSheet, setStar, submitReview,
   openAdminWindowToggle, openAddFood, deleteFood, handleImageUpload, pickEmoji,
   toggleQtyTrack, toggleFoodActive, saveFood, setAdminOrderTab, updateOrderStatus,
+  handleStatusSelect, openStatusConfirm, cancelStatusChange, applyStatusChange,
   setSuperRevenuePeriod, openAddAdmin, createAdminAccount, openResetAdminPassword,
   confirmResetAdminPassword, deleteAdminAccount, renderCartSheet, updateCartFab,
 });
