@@ -1778,7 +1778,11 @@ async function submitReview(){
     rating: tempRating,
     review_text: text,
   });
-  if (error) { showToast('Could not submit review'); return; }
+  if (error) {
+    console.error('Review insert failed:', error);
+    showToast(error.message || 'Unable to submit review. Please try again.');
+    return;
+  }
   closeSheet('rateSheet');
   showToast('Thanks for your feedback! ⭐');
   renderOrders();
