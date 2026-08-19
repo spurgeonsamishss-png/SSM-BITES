@@ -7,6 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf-autotable.min.js"></script>
 <style>
 /* ============ TOKENS — DARK (default) ============ */
 :root{
@@ -832,8 +835,8 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
       </div>
       <div class="section-head"><h3>📤 Export</h3></div>
       <div style="padding:0 20px; display:flex; gap:10px;">
-        <button class="primary-btn" style="flex:1;" onclick="showToast('Excel report exported ✓')">Export Excel</button>
-        <button class="primary-btn outline" style="flex:1;" onclick="showToast('PDF report exported ✓')">Export PDF</button>
+        <button class="primary-btn" style="flex:1;" onclick="exportOrdersExcel()">Export Excel</button>
+        <button class="primary-btn outline" style="flex:1;" onclick="exportOrdersPdf()">Export PDF</button>
       </div>
       <div class="section-head"><h3>💬 Customer Feedback</h3></div>
       <div id="adminReviewsScroll"></div>
@@ -2184,18 +2187,55 @@ async function updateOrderStatus(orderId, status){
 }
 
 /* =========================================================
+   ANALYTICS: SHARED IST DATE HELPERS
+   Fixed +05:30 offset — India has no DST, so this is exact
+   regardless of the visitor's or server's own timezone.
+========================================================= */
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function todayISTString(){
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0,10);
+}
+function istRangeToUTC(period){
+  const n = new Date(Date.now() + IST_OFFSET_MS);
+  const start = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()));
+  if(period==='weekly') start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+  if(period==='monthly') start.setUTCDate(1);
+  const end = new Date(start);
+  if(period==='daily') end.setUTCDate(end.getUTCDate()+1);
+  else if(period==='weekly') end.setUTCDate(end.getUTCDate()+7);
+  else end.setUTCMonth(end.getUTCMonth()+1);
+  return {
+    startUTC: new Date(start.getTime() - IST_OFFSET_MS).toISOString(),
+    endUTC: new Date(end.getTime() - IST_OFFSET_MS).toISOString(),
+  };
+}
+async function fetchRevenueForPeriod(period){
+  const { startUTC, endUTC } = istRangeToUTC(period);
+  const { data } = await supabase.from('orders')
+    .select('total_amount,status,created_at')
+    .gte('created_at', startUTC).lt('created_at', endUTC);
+  const valid = (data||[]).filter(o=>o.status!=='cancelled' && o.status!=='pending_payment');
+  return valid.reduce((s,o)=>s+Number(o.total_amount),0);
+}
+
+/* =========================================================
    ADMIN: REPORTS
 ========================================================= */
 async function renderAdminReports(){
   const { data: allOrders } = await supabase.from('orders').select('total_amount,status');
   const valid = (allOrders||[]).filter(o=>o.status!=='cancelled' && o.status!=='pending_payment');
   const total = valid.reduce((s,o)=>s+Number(o.total_amount),0);
-  document.getElementById('repWeekly').textContent = '₹'+(total*4);
-  document.getElementById('repMonthly').textContent = '₹'+(total*16);
+
+  const [weeklyRevenue, monthlyRevenue] = await Promise.all([
+    fetchRevenueForPeriod('weekly'),
+    fetchRevenueForPeriod('monthly'),
+  ]);
+  document.getElementById('repWeekly').textContent = '₹'+weeklyRevenue;
+  document.getElementById('repMonthly').textContent = '₹'+monthlyRevenue;
   document.getElementById('repAOV').textContent = '₹'+(valid.length? Math.round(total/valid.length):0);
 
-  const rated = state.foods.filter(f=>f.ratingCount>0);
-  const avgRating = rated.length ? rated.reduce((s,f)=>s+f.rating,0)/rated.length : 0;
+  const { data: ratingRows } = await supabase.from('reviews').select('rating');
+  const avgRating = (ratingRows && ratingRows.length) ? ratingRows.reduce((s,r)=>s+r.rating,0)/ratingRows.length : 0;
   document.getElementById('repRating').textContent = avgRating.toFixed(1);
 
   const { data: reviews } = await supabase
@@ -2214,6 +2254,50 @@ async function renderAdminReports(){
     </div>`).join('');
 }
 
+async function fetchExportRows(){
+  const { data, error } = await supabase
+    .from('orders')
+    .select('token_number, order_date, order_category, status, total_amount, payments(status), order_items(item_name, quantity)')
+    .neq('status', 'pending_payment')
+    .order('order_date', { ascending: false });
+  if(error){ showToast('Could not load report data'); return null; }
+  return (data||[]).map(o=>({
+    Token: o.token_number || '',
+    Date: o.order_date || '',
+    Category: (o.order_category||'').toUpperCase(),
+    Items: (o.order_items||[]).map(i=>`${i.item_name} x${i.quantity}`).join(', '),
+    Amount: Number(o.total_amount||0),
+    'Payment Status': o.payments?.[0]?.status || '',
+    'Order Status': o.status,
+  }));
+}
+async function exportOrdersExcel(){
+  const rows = await fetchExportRows();
+  if(!rows || rows.length===0){ showToast('No orders to export'); return; }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Orders');
+  XLSX.writeFile(wb, `ssm-bites-report-${todayISTString()}.xlsx`);
+}
+async function exportOrdersPdf(){
+  const rows = await fetchExportRows();
+  if(!rows || rows.length===0){ showToast('No orders to export'); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(14);
+  doc.text('SSM BITES — Orders Report', 14, 16);
+  doc.setFontSize(9);
+  doc.text(`Generated ${todayISTString()}`, 14, 22);
+  doc.autoTable({
+    startY: 28,
+    head: [['Token','Date','Category','Items','Amount','Payment','Status']],
+    body: rows.map(r=>[r.Token, r.Date, r.Category, r.Items, `Rs.${r.Amount}`, r['Payment Status'], r['Order Status']]),
+    styles: { fontSize: 7 },
+    headStyles: { fillColor: [255,140,66] },
+  });
+  doc.save(`ssm-bites-report-${todayISTString()}.pdf`);
+}
+
 /* =========================================================
    SUPER ADMIN: DASHBOARD
 ========================================================= */
@@ -2229,7 +2313,7 @@ async function renderSuperDashboard(){
   document.getElementById('superTotalRevenue').textContent = '₹'+totalRevenue;
   document.getElementById('superItemsSold').textContent = totalItemsSold;
 
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayISTString();
   const { data: leftover } = await supabase
     .from('daily_stock').select('remaining_qty, menu_item:menu_items(id,name,emoji_icon)').eq('stock_date', today);
   const el = document.getElementById('superLeftoverList');
@@ -2239,22 +2323,18 @@ async function renderSuperDashboard(){
       <div class="food-info"><div class="food-name">${escapeHtml(s.menu_item?.name||'')}</div><div class="stock-tag">${s.remaining_qty} remaining</div></div>
     </div>`).join('') : `<p style="color:var(--text-mid); font-size:12.5px;">No quantity-tracked items yet</p>`;
 
-  await renderSuperRevenuePeriod(totalRevenue);
+  await renderSuperRevenuePeriod();
 }
 async function setSuperRevenuePeriod(period){
   state.superRevenuePeriod = period;
-  document.querySelectorAll('[data-superperiod]').forEach(c=>c.classList.toggle('active', c.dataset.superperiod===period));
-  const { data: allOrders } = await supabase.from('orders').select('status,total_amount');
-  const totalRevenue = (allOrders||[]).filter(o=>o.status!=='cancelled').reduce((s,o)=>s+Number(o.total_amount),0);
-  await renderSuperRevenuePeriod(totalRevenue);
+  await renderSuperRevenuePeriod();
 }
-async function renderSuperRevenuePeriod(totalRevenue){
+async function renderSuperRevenuePeriod(){
   document.querySelectorAll('[data-superperiod]').forEach(c=>c.classList.toggle('active', c.dataset.superperiod===state.superRevenuePeriod));
-  let label, value;
-  if(state.superRevenuePeriod==='daily'){ label='Daily Revenue (Today)'; value = totalRevenue; }
-  else if(state.superRevenuePeriod==='weekly'){ label='Weekly Revenue (est.)'; value = totalRevenue*4; }
-  else { label='Monthly Revenue (est.)'; value = totalRevenue*16; }
-  document.getElementById('superPeriodLabel').textContent = label;
+  const period = state.superRevenuePeriod || 'daily';
+  const value = await fetchRevenueForPeriod(period);
+  const labels = { daily:'Daily Revenue (Today)', weekly:'Weekly Revenue', monthly:'Monthly Revenue' };
+  document.getElementById('superPeriodLabel').textContent = labels[period];
   document.getElementById('superPeriodRevenue').textContent = '₹'+value;
 }
 
