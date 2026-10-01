@@ -756,6 +756,26 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
         </button>
         <div class="profile-row glass"><span class="ic">🎫</span><span class="label">Order History</span><span class="chev" onclick="go('orders')">›</span></div>
         <div class="profile-row glass"><span class="ic">⭐</span><span class="label">My Reviews</span><span class="chev" onclick="go('reviews')">›</span></div>
+        <!-- ===== DELIVERY POINT CARD ===== -->
+        <div class="glass" style="margin:0 0 10px 0; padding:16px; border-radius:18px;">
+          <div style="font-size:10.5px; color:var(--text-mid); font-weight:700; letter-spacing:1px; text-transform:uppercase; margin-bottom:12px;">Food Collection Point</div>
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+            <div style="display:flex; align-items:center; gap:12px;">
+              <span style="font-size:22px;">📍</span>
+              <div>
+                <div style="font-size:14px; font-weight:700;" id="profileDeliveryPointName">Not set</div>
+                <div style="font-size:11px; color:var(--text-mid); margin-top:2px;">Your orders are collected here</div>
+              </div>
+            </div>
+            <button onclick="openDeliveryPointSheet()"
+              style="flex-shrink:0; font-size:11.5px; font-weight:700; color:var(--accent);
+                     padding:8px 14px; background:rgba(255,122,26,0.1); border-radius:10px;
+                     border:1px solid rgba(255,122,26,0.3);">
+              Change
+            </button>
+          </div>
+        </div>
+        <!-- ===== END DELIVERY POINT CARD ===== -->
         <div class="profile-row glass" onclick="doLogout()"><span class="ic">🚪</span><span class="label" style="color:var(--danger);">Log Out</span><span class="chev">›</span></div>
       </div>
     </div>
@@ -819,6 +839,7 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
   <section class="screen" id="screen-admin-orders">
     <div class="topbar"><div class="topbar-name">Live Orders</div><div></div></div>
     <div class="tab-row" id="adminOrderTabs"></div>
+    <div class="chip-row" id="adminDeliveryFilterRow" style="padding-top:0; border-top:1px solid var(--border-soft);"></div>
     <div class="scroll-area" id="adminOrdersScroll"></div>
   </section>
 
@@ -950,6 +971,10 @@ html[data-theme="light"] .sheet-backdrop{background:rgba(60,50,40,0.35);}
   <div class="sheet-backdrop" id="confirmDialogSheet">
     <div class="sheet" id="confirmDialogContent"></div>
   </div>
+  <!-- ================= DELIVERY POINT PICKER SHEET ================= -->
+  <div class="sheet-backdrop" id="deliveryPointSheet">
+    <div class="sheet" id="deliveryPointSheetContent"></div>
+  </div>
 
   <!-- ================= TOKEN / CONFIRMATION SCREEN ================= -->
   <section class="screen" id="screen-token">
@@ -1035,6 +1060,12 @@ let state = {
   orders: [],
   reviews: [],
   notifications: [],
+
+  // ── Delivery Points ──────────────────────────────────────────
+  deliveryPoints: [],         // cached list from DB
+  studentDeliveryPoint: null, // {id, name} for the logged-in student
+  adminDeliveryFilter: 'all', // 'all' OR a delivery_point uuid
+  _tempDpId: null,            // temp selection in the picker sheet
 };
 
 let notifChannel = null;
@@ -1165,6 +1196,8 @@ async function hydrateAndEnter(role, refId, authId) {
     document.getElementById('homeRoll').textContent = 'Roll No. ' + state.loggedInRoll;
     document.getElementById('profileRoll').textContent = state.loggedInRoll;
     document.getElementById('profileAvatar').textContent = state.loggedInRoll.slice(-2);
+    await loadDeliveryPoints();           // NEW — cache delivery points
+    await loadStudentDeliveryPoint();     // NEW — load student's default point
     subscribeRealtimeForStudent();
     await go('home');
   } else if (role === 'super_admin') {
@@ -1251,6 +1284,7 @@ async function go(name){
   if(name==='orders') await renderOrders();
   if(name==='reviews') await renderReviews();
   if(name==='notifications') await renderNotifications();
+  if(name==='profile') { await loadStudentDeliveryPoint(); renderProfileDeliveryPoint(); } // NEW
   window.scrollTo(0,0);
 }
 async function goAdmin(name){
@@ -1537,7 +1571,28 @@ async function renderCartSheet(){
     </div>`;
   }).join('');
   const subtotal = cartTotal();
+  const dpName = state.studentDeliveryPoint?.name;
+  const dpHtml = dpName
+    ? `<div style="display:flex; align-items:center; gap:10px; padding:12px 0;
+                   border-bottom:1px solid var(--border-soft); margin-bottom:6px;">
+         <span style="font-size:17px;">📍</span>
+         <div>
+           <div style="font-size:10.5px; color:var(--text-mid); font-weight:600;">Collection Point</div>
+           <div style="font-size:13px; font-weight:700; margin-top:2px;">${escapeHtml(dpName)}</div>
+         </div>
+         <span style="margin-left:auto; font-size:10px; color:var(--text-low);">from Profile</span>
+       </div>`
+    : `<div style="display:flex; align-items:center; gap:10px; padding:12px;
+                   border-radius:12px; background:rgba(255,77,77,0.08);
+                   border:1px solid rgba(255,77,77,0.25); margin-bottom:10px;">
+         <span style="font-size:17px;">⚠️</span>
+         <span style="font-size:12px; color:var(--danger); font-weight:600; line-height:1.4;">
+           No collection point set.<br>Go to Profile → Change to set one.
+         </span>
+       </div>`;
+
   sumEl.innerHTML = `
+    ${dpHtml}
     ${hasSnacks && hasLunch ? `<div class="summary-row" style="color:var(--accent2);"><span>🔀 Mixed order</span><span>Token: SL0xx</span></div>` : ''}
     <div class="summary-row"><span>Subtotal</span><span>₹${subtotal}</span></div>
     <div class="summary-row total"><span>Total</span><span>₹${subtotal}</span></div>
@@ -1559,6 +1614,13 @@ const PAY_METHODS = [
 ];
 async function openPayment(){
   if(cartCount()===0) return;
+
+  // NEW — Block if no delivery point is configured
+  if (!state.studentDeliveryPoint) {
+    showToast('⚠️ Please set your Food Collection Point in Profile first');
+    return;
+  }
+
 // Per-category window check happens server-side in place_order — this is
 // just a fast client-side pre-check so students see the popup instead of
 // a payment error if a window is closed.
@@ -1626,8 +1688,10 @@ async function processPayment(){
       p_pay_method: state.selectedPayMethod,
     });
     if (orderErr) {
-      if (orderErr.message.includes('SNACKS_WINDOW_CLOSED')) throw new Error('Snacks ordering is currently closed (8:20 AM – 4:30 PM).');
-      if (orderErr.message.includes('LUNCH_WINDOW_CLOSED')) throw new Error('Lunch ordering is currently closed (11:00 AM – 1:45 PM).');
+      if (orderErr.message.includes('SNACKS_WINDOW_CLOSED'))   throw new Error('Snacks ordering is currently closed (8:20 AM – 4:30 PM).');
+      if (orderErr.message.includes('LUNCH_WINDOW_CLOSED'))    throw new Error('Lunch ordering is currently closed (11:00 AM – 1:45 PM).');
+      if (orderErr.message.includes('NO_DELIVERY_POINT'))      throw new Error('Please set your Food Collection Point in Profile before placing an order.');
+      if (orderErr.message.includes('INVALID_DELIVERY_POINT')) throw new Error('Your selected collection point is inactive. Please update it in Profile.');
       throw orderErr;
     }
     const order = orderResult[0]; // { order_id, total_amount } — no token yet
@@ -1702,7 +1766,7 @@ async function renderOrders(){
   const activeStatuses = ['received','preparing','ready_for_pickup'];
   let query = supabase
     .from('orders')
-    .select('id, token_number, status, total_amount, pay_method, placed_at, is_reviewed, order_items(menu_item_id, item_name, quantity, unit_price)')
+    .select('id, token_number, status, total_amount, pay_method, placed_at, is_reviewed, order_items(menu_item_id, item_name, quantity, unit_price), delivery_point:delivery_points(name)')
     .eq('student_id', state.studentId)
     .order('placed_at', { ascending:false });
   query = state.orderTab==='active' ? query.in('status', activeStatuses) : query.in('status', ['collected','cancelled']);
@@ -1725,6 +1789,11 @@ async function renderOrders(){
         <span class="status-pill ${statusClass}">${displayStatus}</span>
       </div>
       <div class="order-items-sm">${escapeHtml(itemsStr)}</div>
+      ${o.delivery_point?.name
+        ? `<div style="display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;color:var(--text-mid);">
+             <span>📍</span><span>${escapeHtml(o.delivery_point.name)}</span>
+           </div>`
+        : ''}
       ${o.status!=='cancelled'?`<div class="progress-track">${STATUS_STEPS.map((s,i)=>`<div class="progress-seg ${i<=stepIdx?'done':''}"></div>`).join('')}</div>`:''}
       <div class="order-foot">
         <span class="order-amt">₹${o.total_amount} · ${escapeHtml(o.pay_method)}</span>
@@ -2111,10 +2180,16 @@ async function renderAdminOrders(){
   renderAdminOrderTabs();
   let query = supabase
     .from('orders')
-    .select('id, token_number, status, total_amount, placed_at, order_items(item_name,quantity), student:students(roll_number)')
+    .select('id, token_number, status, total_amount, placed_at, order_items(item_name,quantity), student:students(roll_number), delivery_point:delivery_points(name)')
     .order('placed_at', { ascending:false });
   query = state.adminOrderTab!=='all' ? query.eq('status', state.adminOrderTab) : query.neq('status', 'pending_payment');
+  if (state.adminDeliveryFilter !== 'all') {
+    query = query.eq('delivery_point_id', state.adminDeliveryFilter);
+  }
   const { data: list } = await query;
+
+  // Render delivery point filter chips
+  await renderAdminDeliveryFilter();
 
   const { count: activeCount } = await supabase
     .from('orders').select('*', { count:'exact', head:true }).in('status', ['received','preparing']);
@@ -2133,6 +2208,11 @@ async function renderAdminOrders(){
       <div class="admin-order-mid">
         <div class="admin-order-student">Roll ${escapeHtml(o.student?.roll_number||'')} · ₹${o.total_amount} · ${timeAgo(o.placed_at)}</div>
         <div class="admin-order-items">${escapeHtml(itemsStr)}</div>
+        ${o.delivery_point?.name
+          ? `<div style="display:flex;align-items:center;gap:4px;margin-top:5px;font-size:11px;font-weight:700;color:var(--accent);">
+               <span>📍</span><span>${escapeHtml(o.delivery_point.name)}</span>
+             </div>`
+          : `<div style="font-size:11px;color:var(--danger);margin-top:5px;">📍 No pickup point</div>`}
       </div>
       ${o.status==='collected' || o.status==='cancelled'
         ? `<div class="status-select status-locked">${ADMIN_TAB_LABELS[o.status]} 🔒</div>`
@@ -2419,6 +2499,133 @@ async function deleteAdminAccount(id){
   await renderSuperAdmins();
   showToast('Admin account deleted');
 }
+/* =========================================================
+   DELIVERY POINTS
+========================================================= */
+
+// Load all ACTIVE delivery points from the DB (for dropdowns/filters)
+async function loadDeliveryPoints() {
+  const { data } = await supabase
+    .from('delivery_points')
+    .select('id, name')
+    .eq('is_active', true)
+    .order('name');
+  state.deliveryPoints = data || [];
+}
+
+// Load the current student's delivery point
+async function loadStudentDeliveryPoint() {
+  if (!state.studentId) return;
+  const { data } = await supabase
+    .from('students')
+    .select('delivery_point_id, delivery_point:delivery_points(id, name)')
+    .eq('id', state.studentId)
+    .single();
+  state.studentDeliveryPoint = data?.delivery_point || null;
+}
+
+// Refresh the delivery point name shown on the Profile screen
+function renderProfileDeliveryPoint() {
+  const el = document.getElementById('profileDeliveryPointName');
+  if (!el) return;
+  if (state.studentDeliveryPoint) {
+    el.textContent = state.studentDeliveryPoint.name;
+    el.style.color = 'var(--text-hi)';
+  } else {
+    el.textContent = 'Not set — tap Change to select';
+    el.style.color = 'var(--danger)';
+  }
+}
+
+// Open the bottom sheet for choosing a collection point
+async function openDeliveryPointSheet() {
+  if (!state.deliveryPoints.length) await loadDeliveryPoints();
+  const current = state.studentDeliveryPoint?.id || null;
+  state._tempDpId = current;
+
+  document.getElementById('deliveryPointSheetContent').innerHTML = `
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Choose Collection Point</div>
+    <p style="font-size:12.5px; color:var(--text-mid); margin-bottom:20px; line-height:1.5;">
+      Select where you will collect your food. This becomes your default for all future orders.
+    </p>
+    <div id="dpOptions" style="display:flex; flex-direction:column; gap:10px; margin-bottom:24px;">
+      ${state.deliveryPoints.length === 0
+        ? `<p style="color:var(--text-mid); font-size:13px;">No collection points available.</p>`
+        : state.deliveryPoints.map(dp => `
+          <button id="dp_opt_${dp.id}" onclick="selectDeliveryOption('${dp.id}')"
+            style="display:flex; align-items:center; gap:14px; padding:15px 16px;
+                   border-radius:18px; text-align:left; width:100%; transition:all .2s ease;
+                   background:${dp.id === current ? 'rgba(255,122,26,0.12)' : 'var(--surface-3)'};
+                   border:${dp.id === current ? '1.5px solid var(--accent)' : '1px solid var(--border-soft)'};">
+            <span style="font-size:22px;">📍</span>
+            <span style="font-size:14px; font-weight:600; flex:1; color:var(--text-hi);">${escapeHtml(dp.name)}</span>
+            <span style="font-size:18px; color:var(--accent);">${dp.id === current ? '✓' : ''}</span>
+          </button>`).join('')}
+    </div>
+    <button class="primary-btn" id="dpSaveBtn" onclick="saveDeliveryPoint()">Save Collection Point</button>
+  `;
+  openSheet('deliveryPointSheet');
+}
+
+// Highlight selected option in the picker
+function selectDeliveryOption(id) {
+  state._tempDpId = id;
+  state.deliveryPoints.forEach(dp => {
+    const btn = document.getElementById(`dp_opt_${dp.id}`);
+    if (!btn) return;
+    const sel = dp.id === id;
+    btn.style.background = sel ? 'rgba(255,122,26,0.12)' : 'var(--surface-3)';
+    btn.style.border = sel ? '1.5px solid var(--accent)' : '1px solid var(--border-soft)';
+    btn.querySelector('span:last-child').textContent = sel ? '✓' : '';
+  });
+}
+
+// Save the selected collection point to the student's profile
+async function saveDeliveryPoint() {
+  const id = state._tempDpId;
+  if (!id) { showToast('Please select a collection point first'); return; }
+  const btn = document.getElementById('dpSaveBtn');
+  if (btn) { btn.textContent = 'Saving…'; btn.classList.add('disabled'); }
+
+  const { error } = await supabase
+    .from('students')
+    .update({ delivery_point_id: id })
+    .eq('id', state.studentId);
+
+  if (error) {
+    showToast('Could not save — try again');
+    if (btn) { btn.textContent = 'Save Collection Point'; btn.classList.remove('disabled'); }
+    return;
+  }
+  const dp = state.deliveryPoints.find(d => d.id === id);
+  state.studentDeliveryPoint = dp ? { id: dp.id, name: dp.name } : null;
+  state._tempDpId = null;
+  closeSheet('deliveryPointSheet');
+  renderProfileDeliveryPoint();
+  showToast('Collection point updated ✓');
+}
+
+// Render the delivery-point filter chips in the Admin Live Orders screen
+async function renderAdminDeliveryFilter() {
+  const el = document.getElementById('adminDeliveryFilterRow');
+  if (!el) return;
+  if (!state.deliveryPoints.length) await loadDeliveryPoints();
+
+  const allChip = `<button class="chip ${state.adminDeliveryFilter === 'all' ? 'active' : ''}"
+    onclick="setAdminDeliveryFilter('all')">All Points</button>`;
+  const dpChips = state.deliveryPoints.map(dp =>
+    `<button class="chip ${state.adminDeliveryFilter === dp.id ? 'active' : ''}"
+      onclick="setAdminDeliveryFilter('${dp.id}')">📍 ${escapeHtml(dp.name)}</button>`
+  ).join('');
+  el.innerHTML = allChip + dpChips;
+}
+
+// Handle admin delivery filter change
+async function setAdminDeliveryFilter(val) {
+  state.adminDeliveryFilter = val;
+  await renderAdminOrders();
+}
 
 /* =========================================================
    EXPOSE everything the inline HTML onclick="" handlers need
@@ -2433,6 +2640,8 @@ Object.assign(window, {
   handleStatusSelect, openStatusConfirm, cancelStatusChange, applyStatusChange,
   setSuperRevenuePeriod, openAddAdmin, createAdminAccount, openResetAdminPassword,
   confirmResetAdminPassword, deleteAdminAccount, renderCartSheet, updateCartFab,
+  // ── Delivery Points (NEW) ──
+  openDeliveryPointSheet, selectDeliveryOption, saveDeliveryPoint, setAdminDeliveryFilter,
 });
 function setMenuMode(mode){
   state.menuMode = mode;
